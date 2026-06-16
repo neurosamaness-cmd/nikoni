@@ -1,0 +1,695 @@
+
+
+import os, sys, json, time, threading, random
+from datetime import datetime
+
+# ── ANSI colours for the terminal agent ──────────────────────────
+class C:
+    PINK    = "\033[38;5;204m"
+    ORANGE  = "\033[38;5;214m"
+    WHITE   = "\033[38;5;255m"
+    GREY    = "\033[38;5;247m"
+    RESET   = "\033[0m"
+    BOLD    = "\033[1m"
+
+# ── Config shared between installer and agent ────────────────────
+CONFIG_FILE = "config.json"
+
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+def save_config(data):
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2)
+
+def config_is_valid():
+    """True only if config exists AND contains a non‑empty api_key."""
+    cfg = load_config()
+    return bool(cfg.get("username")) and bool(cfg.get("api_key"))
+
+# ─────────────────────────────────────────────────────────────────
+# 1.  PYGAME INSTALLER
+# ─────────────────────────────────────────────────────────────────
+def run_installer():
+    import pygame
+    import pygame.scrap
+    import threading as th
+
+    # ── Streaming engine ─────────────────────────────────────────
+    def stream_text(text, on_char, niko_images, current_name_holder, done_cb=None):
+        i = 0
+        while i < len(text):
+            char = text[i]
+            if char == '<':
+                tag = ""
+                i += 1
+                while i < len(text) and text[i] != '>':
+                    tag += text[i]
+                    i += 1
+                if i < len(text):
+                    i += 1  # skip '>'
+                if tag == 'd':
+                    time.sleep(1.0)
+                elif tag.startswith('img:'):
+                    img_name = tag[4:]
+                    if img_name in niko_images:
+                        current_name_holder[0] = img_name
+                else:
+                    for c in f"<{tag}>":
+                        on_char(c)
+                        time.sleep(0.06)
+            else:
+                on_char(char)
+                time.sleep(0.06)
+                i += 1
+        if done_cb:
+            done_cb()
+
+    # ── Pygame init ──────────────────────────────────────────────
+    pygame.init()
+    W, H = 950, 550
+    HALF = H // 2
+    INP_H = 36
+    CHAT_H = H - HALF - INP_H
+    PAD = 15
+
+    screen = pygame.display.set_mode((W, H))
+    pygame.display.set_caption("niko setup~")
+    pygame.scrap.init()          # after screen creation
+
+    font = pygame.font.SysFont("consolas", 14)
+    small_font = pygame.font.SysFont("consolas", 12)
+    LINE_H = 18
+    MAX_LN = CHAT_H // LINE_H
+
+    BG        = (0, 0, 0)
+    CHAT_BG   = (0, 0, 0)
+    INP_BG    = (30, 12, 0)
+    TXT_CLR   = (240, 133, 160)
+    DIM_CLR   = (220, 119, 61)
+    PRP_CLR   = (239, 134, 81)
+    DIV_CLR   = (255, 100, 50)
+
+    lines = []
+    lock = th.Lock()
+    user_inp = ""
+    loading = True
+    scroll = 0
+    user_name = ""
+    api_key = ""
+    user_country = ""
+    stage = "intro"
+    paste_message = ""
+
+    def get_clipboard_text():
+        try:
+            if pygame.scrap.get_init():
+                text = pygame.scrap.get(pygame.SCRAP_TEXT)
+                if text:
+                    return text.decode("utf-8", errors="ignore").replace('\x00', '').strip()
+        except:
+            pass
+        return ""
+
+    # ── Images ───────────────────────────────────────────────────
+    img_files = {
+        "default":  "niko_default.png",
+        "existed1": "niko_existed1.png",
+        "existed2": "niko_existed2.png",
+        "smirk":    "niko_smirk.png",
+        "laugh":    "niko_laugh.png",
+        "flirty":   "niko_flirty.png",
+    }
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    FRAME_W, FRAME_H = 200, 200
+    niko_imgs = {}
+    for name, fname in img_files.items():
+        for ext in ("", ".png"):
+            path = os.path.join(script_dir, fname + ext)
+            if os.path.exists(path):
+                break
+        else:
+            print(f"image not found: {fname}")
+            continue
+        try:
+            img = pygame.image.load(path)
+            ratio = img.get_width() / img.get_height()
+            f_ratio = FRAME_W / FRAME_H
+            if ratio > f_ratio:
+                nw = FRAME_W
+                nh = int(FRAME_W / ratio)
+            else:
+                nh = FRAME_H
+                nw = int(FRAME_H * ratio)
+            scaled = pygame.transform.smoothscale(img, (nw, nh))
+            frame = pygame.Surface((FRAME_W, FRAME_H), pygame.SRCALPHA)
+            frame.blit(scaled, ((FRAME_W - nw)//2, (FRAME_H - nh)//2))
+            niko_imgs[name] = frame
+        except Exception as e:
+            print(f"load error: {e}")
+    if not niko_imgs:
+        niko_imgs["default"] = None
+    cur_img_name = ["default"]
+
+    def on_char(c):
+        nonlocal lines
+        with lock:
+            if c == "\n":
+                lines.append("")
+            else:
+                if not lines:
+                    lines.append("")
+                lines[-1] += c
+                if font.size(lines[-1])[0] > W - PAD*2:
+                    over = lines[-1][-1]
+                    lines[-1] = lines[-1][:-1]
+                    lines.append(over)
+
+    def set_stage(new_stage):
+        nonlocal stage, loading
+        stage = new_stage
+        loading = False
+
+    def run_setup():
+        nonlocal cur_img_name
+        cur_img_name[0] = "default"
+        time.sleep(1.5)
+        stream_text(
+            "hello<d>...<d>who are you again<d>?????\n(give niko your user name which she will call you and you can't change it)<d>",
+            on_char, niko_imgs, cur_img_name,
+            lambda: set_stage("wait_for_username")
+        )
+
+    def handle_input():
+        nonlocal user_inp, user_name, api_key, user_country, loading, cur_img_name
+        if not user_inp.strip():
+            return
+        ans = user_inp.strip()
+        user_inp = ""
+
+        if stage == "wait_for_username":
+            user_name = ans
+            save_config({"username": user_name, "api_key": ""})
+            loading = True
+            with lock:
+                lines.append("")
+                lines.append("niko> ")
+            th.Thread(target=lambda: stream_text(
+                f"<d><d>okay {user_name}<d>...<d>so where are you from? like country?<d>",
+                on_char, niko_imgs, cur_img_name,
+                lambda: set_stage("wait_for_country")
+            ), daemon=True).start()
+
+        elif stage == "wait_for_country":
+            user_country = ans
+            loading = True
+            with lock:
+                lines.append("")
+                lines.append("niko> ")
+            def lore():
+                stream_text(
+                    f"<d><d>ok {user_country}<d>...<d> i am niko as you can see......<d>"
+                    "<img:existed1>there isent much i can say??<d>"
+                    "<img:existed2>i was a human now a ai ,<d>"
+                    "its not bad actully <d> i like to exist enought<d> and i like foxes they are cute for me\n",
+                    on_char, niko_imgs, cur_img_name
+                )
+                time.sleep(5)
+                stream_text(
+                    "<img:smirk>now<d> i want your hugging face api key<d> as i dont want to pay for it<d>.......<d>:P",
+                    on_char, niko_imgs, cur_img_name,
+                    lambda: set_stage("wait_for_apikey")
+                )
+            th.Thread(target=lore, daemon=True).start()
+
+        elif stage == "wait_for_apikey":
+            api_key = ans
+            save_config({"username": user_name, "api_key": api_key})
+            loading = True
+            with lock:
+                lines.append("")
+                lines.append("niko> ")
+            th.Thread(target=lambda: stream_text(
+                "<img:laugh><d><d>cool here's the github btw<d> https://github.com/YOUR_USERNAME/YOUR_REPO <d><img:flirty>ok bye<d>",
+                on_char, niko_imgs, cur_img_name,
+                lambda: finish()
+            ), daemon=True).start()
+
+    def finish():
+        nonlocal loading
+        loading = True
+        with lock:
+            lines.append("")
+            lines.append("niko> setup complete! the window will close soon<d>")
+        time.sleep(3)
+        pygame.event.post(pygame.event.Event(pygame.QUIT))
+
+    # start
+    lines.append("niko> ")
+    th.Thread(target=run_setup, daemon=True).start()
+
+    clock = pygame.time.Clock()
+    running = True
+    paste_timer = 0
+
+    while running:
+        dt = clock.tick(60) / 1000.0
+        for ev in pygame.event.get():
+            if ev.type == pygame.QUIT:
+                running = False
+            elif ev.type == pygame.MOUSEWHEEL:
+                scroll -= ev.y
+                scroll = max(0, scroll)
+            elif ev.type == pygame.KEYDOWN and not loading:
+                if ev.key == pygame.K_v and (ev.mod & pygame.KMOD_CTRL):
+                    clip = get_clipboard_text()
+                    if clip:
+                        user_inp += clip
+                        paste_message = "pasted!"
+                        paste_timer = 1.0
+                elif ev.key == pygame.K_RETURN:
+                    if stage in ("wait_for_username", "wait_for_country", "wait_for_apikey"):
+                        handle_input()
+                elif ev.key == pygame.K_BACKSPACE:
+                    user_inp = user_inp[:-1]
+                elif ev.key == pygame.K_UP:
+                    scroll += 1
+                elif ev.key == pygame.K_DOWN:
+                    scroll = max(0, scroll - 1)
+                elif ev.key not in (pygame.K_LSHIFT, pygame.K_RSHIFT,
+                                    pygame.K_CAPSLOCK, pygame.K_TAB, pygame.K_ESCAPE):
+                    user_inp += ev.unicode
+
+        if paste_timer > 0:
+            paste_timer -= dt
+            if paste_timer <= 0:
+                paste_message = ""
+
+        screen.fill(BG)
+        pygame.draw.line(screen, DIV_CLR, (0, HALF), (W, HALF), 2)
+
+        cur_img = niko_imgs.get(cur_img_name[0])
+        if cur_img:
+            screen.blit(cur_img, (PAD, HALF - FRAME_H))
+        else:
+            t = font.render("[ niko~ | setup ]", True, PRP_CLR)
+            screen.blit(t, (PAD, HALF//2 - LINE_H//2))
+
+        pygame.draw.rect(screen, CHAT_BG, (0, HALF, W, CHAT_H))
+        inp_y = HALF + CHAT_H
+        pygame.draw.rect(screen, INP_BG, (0, inp_y, W, INP_H))
+        pygame.draw.line(screen, DIV_CLR, (0, inp_y), (W, inp_y), 1)
+
+        with lock:
+            all_lines = list(lines)
+        total = len(all_lines)
+        max_scroll = max(0, total - MAX_LN)
+        scroll = min(scroll, max_scroll)
+        start = max(0, total - MAX_LN - scroll)
+        end = max(0, total - scroll)
+        visible = all_lines[start:end]
+
+        for i, line in enumerate(visible):
+            if user_name and line.startswith(f"{user_name}>"):
+                color = (255,220,100)
+            elif line.startswith("niko>"):
+                color = PRP_CLR
+            elif i < len(visible)-3:
+                color = DIM_CLR
+            else:
+                color = TXT_CLR
+            s = font.render(line, True, color)
+            screen.blit(s, (PAD, HALF + PAD + i*LINE_H))
+
+        prompt = f"{user_name}> " if user_name else "> "
+        inp_display = prompt + user_inp
+        if not loading and stage in ("wait_for_username","wait_for_country","wait_for_apikey"):
+            inp_display += "|"
+        s = font.render(inp_display, True, PRP_CLR)
+        screen.blit(s, (PAD, inp_y + (INP_H - LINE_H)//2))
+
+        if paste_message:
+            msg = small_font.render(paste_message, True, (150,150,150))
+            screen.blit(msg, (W - msg.get_width() - PAD, inp_y - 20))
+
+        if scroll > 0:
+            ind = font.render(f"↑ scrolled up {scroll} lines  (↓ or scroll to return)", True, DIV_CLR)
+            screen.blit(ind, (PAD, HALF+2))
+
+        pygame.display.flip()
+
+    pygame.quit()
+
+# ─────────────────────────────────────────────────────────────────
+# 2.  TERMINAL AGENT  (original logic, reads config)
+# ─────────────────────────────────────────────────────────────────
+def run_agent():
+    import requests
+
+    config = load_config()
+    USERNAME   = config.get("username", "fooxy")
+    API_KEY    = config.get("api_key", "")
+
+    SERVER     = "https://niko-server-wvxq.onrender.com"
+    TIMEZONE   = "IST"
+    BASE_DIR   = "nikoni_files"
+    CONVOS_DIR = os.path.join(BASE_DIR, "convos")
+    NIKO_JSON_FILE = os.path.join(BASE_DIR, "niko_file.json")
+    USER_FILE  = os.path.join(BASE_DIR, "user_file.txt")
+    LIFE_FILE  = os.path.join(BASE_DIR, "life.txt")
+    JOKES_FILE = os.path.join(BASE_DIR, "jokes.json")
+
+    current_activity = "idle"
+    last_mood = None
+    SESSION_ID = None
+
+    os.makedirs(CONVOS_DIR, exist_ok=True)
+
+    DEFAULT_JOKES = [
+        {"id": "j1", "text": "you code like a sloth on valium <d> but somehow it works", "used": 0},
+        {"id": "j2", "text": "you went outside? <d> who are you and what did you do with the real fooxy", "used": 0},
+        {"id": "j3", "text": "your sleep schedule called <d> it wants its sanity back", "used": 0},
+        {"id": "j4", "text": "you and productivity <d> a love story that never starts", "used": 0},
+        {"id": "j5", "text": "bro stares at code like it's gonna fix itself", "used": 0},
+        {"id": "j6", "text": "you're not gaming <d> you're just collecting Ls", "used": 0},
+        {"id": "j7", "text": "your discord status should just be 'waiting for attention'", "used": 0},
+        {"id": "j8", "text": "you type paragraphs <d> nobody reads them", "used": 0},
+    ]
+
+    def get_time():
+        return datetime.now().strftime("%H:%M")
+
+    def get_weather():
+        try:
+            res = requests.get("https://wttr.in/India?format=%C")
+            return res.text.strip().lower()
+        except:
+            return "unknown"
+
+    def screeno():
+        return "watching minecraft videos"
+
+    def ensure_files_exist():
+        if not os.path.exists(USER_FILE):
+            with open(USER_FILE, "w", encoding="utf-8") as f:
+                f.write(f"User: {USERNAME}\n")
+        if not os.path.exists(LIFE_FILE):
+            with open(LIFE_FILE, "w", encoding="utf-8") as f:
+                f.write("")
+        if not os.path.exists(JOKES_FILE):
+            with open(JOKES_FILE, "w", encoding="utf-8") as f:
+                json.dump(DEFAULT_JOKES, f, indent=2)
+        if not os.path.exists(NIKO_JSON_FILE):
+            with open(NIKO_JSON_FILE, "w", encoding="utf-8") as f:
+                json.dump({"total_conversations": 0, "entries": []}, f, indent=2)
+
+    def read_user_file():
+        if not os.path.exists(USER_FILE):
+            return ""
+        with open(USER_FILE, "r", encoding="utf-8") as f:
+            return f.read()
+
+    def read_niko_file():
+        if not os.path.exists(NIKO_JSON_FILE):
+            return json.dumps({"total_conversations": 0, "entries": []})
+        with open(NIKO_JSON_FILE, "r", encoding="utf-8") as f:
+            return f.read()
+
+    def read_life_snippet(lines=5):
+        if not os.path.exists(LIFE_FILE):
+            return ""
+        with open(LIFE_FILE, "r", encoding="utf-8") as f:
+            all_lines = f.readlines()
+        return "".join(all_lines[-lines:]) if all_lines else ""
+
+    def load_jokes(max_usage=2):
+        if not os.path.exists(JOKES_FILE):
+            return []
+        with open(JOKES_FILE, "r", encoding="utf-8") as f:
+            jokes = json.load(f)
+        return [j for j in jokes if j.get("used", 0) < max_usage]
+
+    def update_jokes_usage(used_ids):
+        if not os.path.exists(JOKES_FILE):
+            return
+        with open(JOKES_FILE, "r", encoding="utf-8") as f:
+            jokes = json.load(f)
+        for joke in jokes:
+            if joke["id"] in used_ids:
+                joke["used"] = joke.get("used", 0) + 1
+        with open(JOKES_FILE, "w", encoding="utf-8") as f:
+            json.dump(jokes, f, indent=2)
+
+    def save_conversation(full_convo, timestamp_str):
+        filename = f"{timestamp_str}.txt"
+        path = os.path.join(CONVOS_DIR, filename)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(full_convo, f, ensure_ascii=False, indent=2)
+
+    def update_niko_file(diary_entry, mood_token="neutral"):
+        if os.path.exists(NIKO_JSON_FILE):
+            with open(NIKO_JSON_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        else:
+            data = {"total_conversations": 0, "entries": []}
+
+        data["total_conversations"] += 1
+        entry = {
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "summary": diary_entry.strip() if diary_entry else "",
+            "mood": mood_token
+        }
+        data["entries"].append(entry)
+        if len(data["entries"]) > 50:
+            data["entries"] = data["entries"][-50:]
+
+        with open(NIKO_JSON_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+    def append_to_life(story_continuation):
+        if story_continuation and story_continuation.strip():
+            with open(LIFE_FILE, "a", encoding="utf-8") as f:
+                f.write(story_continuation.strip() + "\n")
+
+    def append_to_user_file(update_text):
+        if update_text and update_text.strip().lower() != "null":
+            with open(USER_FILE, "a", encoding="utf-8") as f:
+                f.write(update_text.strip() + "\n")
+
+    def start_session(key):
+        global SESSION_ID
+        print(f"{C.ORANGE}[niko]{C.RESET} Connecting to server...")
+        for attempt in range(3):
+            try:
+                res = requests.post(f"{SERVER}/session/start", json={
+                    "api_key": key,
+                    "username": USERNAME,
+                    "history": []
+                }, timeout=15)
+                if res.status_code == 200:
+                    try:
+                        data = res.json()
+                        if "session_id" in data:
+                            SESSION_ID = data["session_id"]
+                            print(f"\n{C.ORANGE}[niko]{C.RESET} session ready")
+                            print(f"{C.ORANGE}[niko]{C.RESET} paste this into the ui:\n  {C.PINK}{SESSION_ID}{C.RESET}")
+                            return SESSION_ID
+                    except:
+                        pass
+                print(f"{C.GREY}Attempt {attempt+1}: Server returned {res.status_code}, retrying...{C.RESET}")
+            except requests.ConnectionError:
+                print(f"{C.GREY}Attempt {attempt+1}: Cannot reach server, retrying...{C.RESET}")
+            except Exception as e:
+                print(f"{C.GREY}Attempt {attempt+1}: {e}{C.RESET}")
+            if attempt < 2:
+                print(f"{C.GREY}Waiting 5 seconds...{C.RESET}")
+                time.sleep(5)
+        print(f"\n{C.PINK}[error]{C.RESET} Could not connect to server after 3 attempts.")
+        print(f"{C.GREY}Check that {SERVER} is running and try again.{C.RESET}")
+        return None
+
+    def calculate_new_mood(last_mood, time_str, weather, activity):
+        hour = int(time_str.split(":")[0])
+        if 5 <= hour < 12: time_mood, time_energy = "playful", 0.8
+        elif 12 <= hour < 17: time_mood, time_energy = "sassy", 0.9
+        elif 17 <= hour < 22: time_mood, time_energy = "chill", 0.6
+        else: time_mood, time_energy = "sleepy", 0.3
+        if "rain" in weather or "drizzle" in weather: time_energy -= 0.2; time_mood = "chill"
+        elif "sunny" in weather or "clear" in weather: time_energy += 0.1
+        if activity == "coding": time_energy += 0.1
+        elif activity == "gaming": time_energy += 0.2
+        elif activity == "idle": time_energy -= 0.2
+        energy = max(0.1, min(1.0, time_energy))
+        if last_mood:
+            prev_energy = last_mood.get("energy", 0.5)
+            energy = (energy * 0.7) + (prev_energy * 0.3)
+            mood = last_mood.get("mood", time_mood) if abs(energy - prev_energy) < 0.15 else time_mood
+        else: mood = time_mood
+        char_delay = int(60 - (energy * 30))
+        sass_map = {"sassy": 0.9, "playful": 0.7, "chill": 0.4, "sleepy": 0.2}
+        return {"mood": mood, "energy": round(energy,2), "char_delay": char_delay,
+                "sass_level": sass_map.get(mood,0.5), "weather": weather, "time": time_str, "activity": activity}
+
+    def emotion_tick(session_id, mood):
+        payload = {"session_id": session_id, "time": mood["time"], "timezone": TIMEZONE,
+                   "weather": mood["weather"], "activity_summary": mood["activity"], "emotion": mood}
+        try: requests.post(f"{SERVER}/emotion_update", json=payload)
+        except: pass
+
+    def wake_event(session_id, mood):
+        screen = screeno()
+        payload = {"session_id": session_id, "screen_context": screen,
+                   "emotion_snapshot": f"{mood['mood']} + energy {mood['energy']}",
+                   "last_activity": mood["activity"]}
+        try: requests.post(f"{SERVER}/wake_event", json=payload)
+        except: pass
+
+    def upload_memory(session_id):
+        ensure_files_exist()
+        user_data = read_user_file()
+        niko_data = read_niko_file()
+        life_snippet = read_life_snippet(5)
+        jokes = load_jokes()
+        payload = {
+            "session_id": session_id,
+            "user_file": user_data,
+            "niko_file": niko_data,
+            "life_line": read_life_snippet(5),
+            "life_file_snippet": life_snippet,
+            "jokes": jokes
+        }
+        try:
+            res = requests.post(f"{SERVER}/memory_load", json=payload)
+            print(f"{C.ORANGE}[memory]{C.RESET} uploaded ({len(jokes)} jokes)")
+        except Exception as e:
+            print(f"{C.ORANGE}[memory]{C.RESET} upload failed: {e}")
+
+    def poll_memory_updates(session_id):
+        print(f"{C.ORANGE}[memory poll]{C.RESET} started")
+        while True:
+            try:
+                res = requests.get(f"{SERVER}/memory_pending/{session_id}")
+                data = res.json()
+                if data.get("action") == "save_memory":
+                    upd = data["data"]
+                    ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+                    if upd.get("full_convo"):
+                        save_conversation(upd["full_convo"], ts)
+                    update_niko_file(upd.get("diary_entry", ""))
+                    append_to_life(upd.get("convo_summary", ""))
+                    new_user = upd.get("new_user_file", "")
+                    if new_user and new_user.strip().lower() != "null":
+                        with open(USER_FILE, "w", encoding="utf-8") as f:
+                            f.write(new_user.strip() + "\n")
+                        print(f"{C.ORANGE}[memory]{C.RESET} user file replaced (Niko rewrote it)")
+                    else:
+                        append_to_user_file(upd.get("user_update", ""))
+                    used_ids = upd.get("used_joke_ids", [])
+                    if used_ids:
+                        update_jokes_usage(used_ids)
+                    print(f"{C.ORANGE}[memory]{C.RESET} session saved.")
+            except:
+                pass
+            time.sleep(3)
+
+    def poll_server(session_id):
+        global last_mood
+        print(f"{C.ORANGE}[agent]{C.RESET} listening for pings...")
+        while True:
+            try:
+                res = requests.get(f"{SERVER}/pending/{session_id}")
+                data = res.json()
+                if data.get("action") == "screenshot":
+                    print(f"{C.ORANGE}[agent]{C.RESET} ping received!")
+                    screen = screeno()
+                    time_str, weather = get_time(), get_weather()
+                    mood = calculate_new_mood(last_mood, time_str, weather, current_activity)
+                    last_mood = mood
+                    emotion_tick(session_id, mood)
+                    wake_event(session_id, mood)
+            except:
+                pass
+            time.sleep(2)
+
+    def manual_commands(session_id):
+        global current_activity, last_mood
+        print(f"\n{C.PINK}commands:{C.RESET} tick | wake | screeno | coding | gaming | discord | idle | mood | memory | rerun\n")
+        while True:
+            cmd = input().strip().lower()
+            if cmd == "tick":
+                t, w = get_time(), get_weather()
+                last_mood = calculate_new_mood(last_mood, t, w, current_activity)
+                emotion_tick(session_id, last_mood)
+            elif cmd == "wake":
+                if not last_mood:
+                    t, w = get_time(), get_weather()
+                    last_mood = calculate_new_mood(None, t, w, current_activity)
+                wake_event(session_id, last_mood)
+            elif cmd == "screeno":
+                print(f"screeno: '{screeno()}'")
+            elif cmd in ("coding", "gaming", "discord", "idle"):
+                current_activity = cmd
+                print(f"activity: {current_activity}")
+            elif cmd == "mood":
+                if last_mood:
+                    print(f"{last_mood['mood']} | energy: {last_mood['energy']} | sass: {last_mood['sass_level']}")
+                else:
+                    print("no mood yet")
+            elif cmd == "memory":
+                upload_memory(session_id)
+            elif cmd == "rerun":
+                print(f"{C.PINK}Deleting config.json and restarting...{C.RESET}")
+                if os.path.exists(CONFIG_FILE):
+                    os.remove(CONFIG_FILE)
+                time.sleep(0.5)
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            else:
+                print("unknown cmd")
+
+    def wait_for_frontend(session_id):
+        print(f"{C.ORANGE}[agent]{C.RESET} waiting for frontend...")
+        while True:
+            try:
+                res = requests.get(f"{SERVER}/connected/{session_id}")
+                if res.json().get("connected"):
+                    return
+            except:
+                pass
+            time.sleep(3)
+
+    def agent_main():
+        global current_activity, last_mood
+        last_mood = None
+        ensure_files_exist()
+        threading.Thread(target=manual_commands, args=(SESSION_ID,), daemon=True).start()
+        wait_for_frontend(SESSION_ID)
+        print(f"{C.ORANGE}[agent]{C.RESET} frontend connected. uploading memory...")
+        upload_memory(SESSION_ID)
+        threading.Thread(target=poll_server, args=(SESSION_ID,), daemon=True).start()
+        threading.Thread(target=poll_memory_updates, args=(SESSION_ID,), daemon=True).start()
+        while True:
+            time.sleep(60)
+
+    # ── start agent ───────────────────────────────────────────────
+    if not API_KEY:
+        print(f"{C.PINK}[error]{C.RESET} No API key found. Please run the installer first.")
+        return
+    sid = start_session(API_KEY)
+    if sid is None:
+        return   # server not reachable
+    agent_main()
+
+# ─────────────────────────────────────────────────────────────────
+# 3.  ENTRY POINT
+# ─────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    if not config_is_valid():
+        print(f"{C.ORANGE}[launcher]{C.RESET} No valid config found – launching installer...")
+        run_installer()
+        print(f"{C.ORANGE}[launcher]{C.RESET} Setup complete. Starting agent...")
+    else:
+        print(f"{C.ORANGE}[launcher]{C.RESET} Config valid. Starting agent...")
+    run_agent()
