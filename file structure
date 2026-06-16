@@ -1,0 +1,12 @@
+your-niko-folder/
+├── niko.py              ← the agent
+├── niko_ui.py           ← the Gradio UI
+├── niko_script.js       ← the JavaScript
+├── niko_default.png     ← installer images
+├── niko_existed1.png
+├── niko_existed2.png
+├── niko_smirk.png
+├── niko_laugh.png
+├── niko_flirty.png
+├── config.json          ← created after setup
+└── nikoni_files/        ← created after setup
