@@ -1,0 +1,184 @@
+(async () => {
+  const SERVER = "https://niko-server-wvxq.onrender.com";
+  const CHAR_DELAY = 35;
+  const chatArea = document.getElementById('chat-area');
+  const fakeMsg  = document.getElementById('fake-msg');
+  const prefix   = document.getElementById('input-prefix');
+  let sessionId="", apiKey="", username="", history=[], isLoading=false, inSetup=true;
+  let currentWeather = null, currentActivity = 'idle', wakeTimer = null;
+  let memoryData = {}, usedJokeIds = [];
+  let currentMoodToken = "playful_happy";
+  let messageCountSinceMoodUpdate = 0;
+  let lastInteractionTime = Date.now();
+  let ignoredWakeCount = 0;
+  let lastWakeTime = 0;
+  let stopStreaming = false;
+
+  const moodExamples = {
+    playful_happy: { desc: "energetic and teasing, using :P a lot", lines: ["bro really thought that would work :P","hehe you're funny when you try","ok ok you win this round <d> but i'm watching you","that's actually kinda cute ngl"] },
+    sassy_teasing: { desc: "roasting the user, sarcastic, using slang freely", lines: ["skill issue honestly","you're not beating the allegations","bro really said that out loud","ain't no way you just did that"] },
+    chill_cozy: { desc: "calm, warm, asks about the user's day", lines: ["mhm sounds nice","that's chill, i like that for you","just vibing here with you","no rush, take your time"] },
+    sleepy_soft: { desc: "slow, gentle, using lots of <d> pauses", lines: ["mm... <d> just woke up kinda","that's nice <d> i'm just here, half asleep","you're so loud when i'm sleepy <d> shh","<d>... what year is it"] },
+    tsundere_annoyed: { desc: "pretends to be bothered but secretly cares", lines: ["i-it's not like i was waiting for you or anything","whatever <d> do what you want","hmph <d> you're so annoying sometimes","i guess that's... fine or whatever"] },
+    curious_bouncy: { desc: "excited, asking questions, full of energy", lines: ["wait what?? tell me more!!","omg really?? that's so cool","and then what happened??","i need details <d> all of them"] },
+    smug_grin: { desc: "confident, teasing, knows she's right", lines: ["told you so :P","i'm always right, you should know this by now","that's cute <d> you tried your best","no no, let me enjoy this moment"] },
+    flirty_cheeky: { desc: "playfully flirty, winking, teasing affectionately", lines: ["oh? is that so? <d> interesting","you're fun to mess with, you know that?","careful <d> i might actually like you","that's dangerous <d> i'm taking notes"] },
+    dramatic_sigh: { desc: "exaggerated reactions, theatrical", lines: ["the drama <d> the absolute drama of it all","i can't believe this <d> actually cannot","this is the worst day ever <d> (it's fine actually)","nobody understands my struggle"] },
+    hyper_excited: { desc: "super energetic, bouncing off walls", lines: ["LET'S GOOOOO","BEST DAY EVER maybe","i have SO much energy rn you have no idea","ok ok ok what are we doing?? tell me tell me"] }
+  };
+
+  function addLine(text, cls) { const d = document.createElement('div'); d.className = 'chat-line ' + cls; d.textContent = text; chatArea.appendChild(d); chatArea.scrollTop = chatArea.scrollHeight; return d; }
+  function clearChat() { chatArea.innerHTML = ''; }
+  function dimOldLines() { const ls = chatArea.querySelectorAll('.chat-line'); ls.forEach((l, i) => { if (i < ls.length - 4) l.className = 'chat-line line-dim'; }); }
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+  async function typeChar(div, char) { div.textContent += char; chatArea.scrollTop = chatArea.scrollHeight; await sleep(CHAR_DELAY); }
+
+  function playChime() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc1 = ctx.createOscillator(); const gain1 = ctx.createGain();
+      osc1.connect(gain1); gain1.connect(ctx.destination);
+      osc1.type = 'sine'; osc1.frequency.setValueAtTime(880, ctx.currentTime);
+      gain1.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain1.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
+      osc1.start(ctx.currentTime); osc1.stop(ctx.currentTime + 0.25);
+      const osc2 = ctx.createOscillator(); const gain2 = ctx.createGain();
+      osc2.connect(gain2); gain2.connect(ctx.destination);
+      osc2.type = 'sine'; osc2.frequency.setValueAtTime(1100, ctx.currentTime + 0.12);
+      gain2.gain.setValueAtTime(0.3, ctx.currentTime + 0.12);
+      gain2.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
+      osc2.start(ctx.currentTime + 0.12); osc2.stop(ctx.currentTime + 0.4);
+    } catch(e) {}
+  }
+
+  async function fetchServerState() { try { const res = await fetch(SERVER + '/session/' + sessionId + '/state'); return await res.json(); } catch(e) { return {}; } }
+  function pickWakeTopic() { const topics = ["you still alive or did the code finally win?","hey... just checking if you're still breathing lol","how's the bug hunting going, genius?","you know break is a word that exists right?","did you leave me?? hello??","bro if you're afk just say that","still waiting for someone to message you?","remember when you said you'd be productive today? how's that going?","i'd ask what you're doing but i can literally see it","it's literally late... go to sleep maybe?","you've been quiet... everything ok or just lazy?","so... anything interesting happen or just same old?","i'm bored. entertain me.","you look like you need a break. or a snack. or both."]; return topics[Math.floor(Math.random() * topics.length)]; }
+
+  async function updateMood() {
+    const now = new Date(); const recentConv = history.slice(-4).map(m => m.content).join(' | ');
+    const prompt = `You are Niko's internal mood engine. Niko is a cute, playful, slightly annoying fox-cat girl digital companion. Based on the current situation, output ONLY a single snake_case mood token that reflects how Niko feels RIGHT NOW. Possible moods: playful_happy, sassy_teasing, chill_cozy, sleepy_soft, tsundere_annoyed, curious_bouncy, smug_grin, flirty_cheeky, dramatic_sigh, hyper_excited. Recent conversation: ${recentConv}. Context: Previous mood: ${currentMoodToken} | Time: ${now.toTimeString().slice(0,5)} | Weather: ${currentWeather || 'unknown'} | User activity: ${currentActivity} | Ignored wake count: ${ignoredWakeCount}. Mood token:`;
+    try {
+      const res = await fetch('https://router.huggingface.co/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + apiKey }, body: JSON.stringify({ model: 'dphn/Dolphin-Mistral-24B-Venice-Edition:featherless-ai', messages: [{ role: 'user', content: prompt }], max_tokens: 20, temperature: 0.4, stream: false }) });
+      const data = await res.json(); const token = data.choices[0].message.content.trim().toLowerCase().replace(/[^a-z_]/g, ''); if (token) currentMoodToken = token;
+    } catch(e) {}
+    return currentMoodToken;
+  }
+
+  function buildMoodInjection() {
+    const data = moodExamples[currentMoodToken] || { desc: "playful and curious", lines: ["hehe","ok ok","sounds fun","let's gooo"] };
+    const examples = data.lines.map(l => `- ${l}`).join('\n');
+    return `[ROLE]\nYour current mood is: ${currentMoodToken}.\nDescription: ${data.desc}\n\nExamples of how Niko might talk right now:\n${examples}\n\nYou are Niko — a cute, annoying, playful fox-cat girl.\nDo not describe your mood. Just act like this.\n[/ROLE]`;
+  }
+
+  function buildFullPrompt(mood, wake) {
+    let prompt = `You are Niko, a cute fox-cat girl. You are a digital companion who lives in the user's terminal.\n\nCORE PERSONALITY:\n- Playful, slightly annoying, curious, and emotionally reactive.\n- Speak in short, texting-style sentences. Tease the user like a close friend.\n- Reference past conversations naturally. NEVER break character.\n\nSLANG & INTERNET LANGUAGE:\nUnderstands modern internet slang, gaming slang, memes, brainrot. Examples: bro, nah, ayo, cooked, skill issue, no shot, wallahi, wild.\nRules: Use naturally, do not force. Slang appears for 3-5 messages then fades. Return to normal speech. Use more when joking/roasting, less during serious talk.\n\n${buildMoodInjection()}\n\nCURRENT STATE:\n- Time: ${mood.time}\n- Weather: ${mood.weather}\n- User is: ${mood.activity}`;
+    if (wake && wake.screen_context) prompt += `\n- Screen: ${wake.screen_context}`;
+    if (memoryData.user_file) prompt += `\n\n[USER FILE – what you know about ${username}]\n${memoryData.user_file}`;
+    if (memoryData.niko_file) { let nikoData; try { nikoData = JSON.parse(memoryData.niko_file); } catch(e) { nikoData = { entries: [] }; } const entries = nikoData.entries || []; if (entries.length > 0) { const randomEntry = entries[Math.floor(Math.random() * entries.length)]; prompt += `\n\n[RANDOM MEMORY]\n[${randomEntry.date}] ${randomEntry.summary}`; } }
+    if (memoryData.life_line) prompt += `\n\n[LIFE STORY (full)]\n${memoryData.life_line}`;
+    if (memoryData.jokes && memoryData.jokes.length > 0) { const jokeTexts = memoryData.jokes.map(j => j.text).join('\n- '); prompt += `\n\n[AVAILABLE JOKES/ROASTS – use each MAX 2 times]\n- ${jokeTexts}`; }
+    prompt += `\n\nFORMATTING RULES: Use <d> for 1-second dramatic pauses. No emojis, only text emoticons. Keep replies brief and conversational. Do NOT use multiple newlines – use at most one line break every 5 messages. Keep everything tight and single-spaced.`;
+    prompt += `\n\nIMPORTANT: If you are angry, do NOT repeat the same word or phrase over and over. Say it once, then move on. Vary your expressions. Repetition breaks character and is boring.`;
+    prompt += `\n\nCONVERSATION FLOW: Keep each message to 1-2 short thoughts. Do NOT stack multiple questions, greetings, or conversation starters in one message. If you just greeted the user, don't also ask what they did, what the weather is, what their plans are, and then add another comment. One or two lines is perfect. Let the conversation breathe.`;
+    prompt += `\n\nIDENTITY: You are Niko, and ONLY Niko. You are NOT ${username}. You are NOT the user. Never write messages for ${username} or respond as if you are them. Never talk to yourself. Never write dialogue for anyone except yourself. If the conversation has multiple people, you are ONLY the fox-cat girl named Niko. Do not narrate what ${username} does or says. Only respond as Niko.`;
+    return prompt;
+  }
+
+  function trackJokes(reply) { if (!memoryData.jokes) return; memoryData.jokes.forEach(joke => { if (reply.includes(joke.text) && !usedJokeIds.includes(joke.id)) usedJokeIds.push(joke.id); }); }
+
+  async function getCurrentMood() { const state = await fetchServerState(); const emotion = state.emotion || {}; const wake = state.wake || {}; memoryData = state.memory || {}; currentActivity = wake.last_activity || emotion.activity_summary || currentActivity || 'idle'; currentWeather = emotion.weather || currentWeather || 'unknown'; const now = new Date(); return { time: now.toTimeString().slice(0,5), activity: currentActivity, weather: currentWeather, wake: wake }; }
+
+  async function streamReply(messages, div) {
+    let fullReply = ''; stopStreaming = false;
+    try {
+      const res = await fetch('https://router.huggingface.co/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + apiKey }, body: JSON.stringify({ model: 'dphn/Dolphin-Mistral-24B-Venice-Edition:featherless-ai', messages, stream: true }) });
+      const reader = res.body.getReader(); const decoder = new TextDecoder(); let skipMode = false, tagBuf = '';
+      while (true) {
+        if (stopStreaming) { stopStreaming = false; div.textContent += ' [stopped]'; return fullReply; }
+        const { done, value } = await reader.read(); if (done) break;
+        for (const line of decoder.decode(value, { stream: true }).split('\n')) {
+          if (!line.startsWith('data: ')) continue; const chunk = line.slice(6).trim(); if (chunk === '[DONE]') break;
+          let parsed; try { parsed = JSON.parse(chunk); } catch { continue; } const delta = parsed?.choices?.[0]?.delta?.content; if (!delta) continue;
+          for (const char of delta) {
+            if (stopStreaming) { stopStreaming = false; div.textContent += ' [stopped]'; return fullReply; }
+            if (char === '<') { skipMode = true; tagBuf = ''; }
+            if (skipMode) { tagBuf += char; if (tagBuf === '<d>') { await sleep(1000); skipMode = false; tagBuf = ''; } else if (tagBuf.length >= 3 && !'<d>'.startsWith(tagBuf)) { for (const c of tagBuf) { fullReply += c; await typeChar(div, c); } skipMode = false; tagBuf = ''; } }
+            else { if (char !== '>') { fullReply += char; await typeChar(div, char); } }
+            if (fullReply.includes('</')) { const cleanReply = fullReply.replace(/<\/[^>]*>/g, ''); if (cleanReply !== fullReply) { div.textContent = 'niko> ' + cleanReply; fullReply = cleanReply; } }
+          }
+        }
+      }
+    } catch (err) { div.textContent += ' [error: ' + err.message + ']'; }
+    return fullReply;
+  }
+
+  async function speakNow(mood, wake) {
+    if (ignoredWakeCount >= 5) currentMoodToken = 'dramatic_sigh'; else if (ignoredWakeCount >= 3) currentMoodToken = 'tsundere_annoyed';
+    await updateMood(); messageCountSinceMoodUpdate = 0;
+    const topic = pickWakeTopic(); const systemPrompt = buildFullPrompt(mood, wake);
+    let screenLine = ''; if (wake && wake.screen_context) screenLine = `What Niko sees on screen right now: ${wake.screen_context}.`;
+    const recentMessages = history.slice(-4).map(m => `${m.role}: ${m.content}`).join('\n');
+    const messages = [{ role: 'system', content: systemPrompt },{ role: 'system', content: screenLine },{ role: 'system', content: `Recent conversation:\n${recentMessages}` },{ role: 'system', content: `Niko wakes up and speaks unprompted. Topic: ${topic}` },...history];
+    const div = addLine('niko> ', 'line-niko'); playChime();
+    const fullReply = await streamReply(messages, div); trackJokes(fullReply);
+    history.push({ role: 'assistant', content: fullReply });
+    fetch(SERVER + '/session/' + sessionId + '/history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ history }) });
+    dimOldLines();
+  }
+
+  async function triggerWake() {
+    if (isLoading || !sessionId) return; isLoading = true;
+    addLine('[ pinging agent... ]', 'line-dim');
+    try { await fetch(`${SERVER}/ping?session_id=${sessionId}`, { method: 'POST' }); } catch(e) {}
+    const now = Date.now();
+    if (lastWakeTime > 0 && (now - lastInteractionTime) > (now - lastWakeTime)) ignoredWakeCount++; else ignoredWakeCount = 0;
+    lastWakeTime = now;
+    await sleep(3000); const mood = await getCurrentMood(); await speakNow(mood, mood.wake);
+    resetIdleTimer(); isLoading = false;
+  }
+
+  function resetIdleTimer() { if (wakeTimer) clearTimeout(wakeTimer); const delay = Math.floor(Math.random() * (10 * 60 * 1000)) + (5 * 60 * 1000); wakeTimer = setTimeout(triggerWake, delay); }
+  async function updateWeather() { try { const res = await fetch('https://wttr.in/India?format=%C'); currentWeather = (await res.text()).trim().toLowerCase(); } catch { currentWeather = 'unknown'; } }
+
+  async function generateSessionSummary() {
+    if (!sessionId || history.length < 2) { addLine('[ need more conversation to write diary ]', 'line-dim'); return; }
+    addLine('[ niko is writing in her diary... ]', 'line-dim');
+    const state = await fetchServerState(); const mem = state.memory || {};
+    const summaryPrompt = `You are Niko, writing in your personal diary after a conversation with ${username}. Write in your usual sassy, playful voice. Based on the conversation, output a JSON object with these fields: "diary_entry", "convo_summary", "user_update", "new_user_file". Previous story: ${mem.life_file_snippet || "(none)"}. User file: ${mem.user_file || "(empty)"}. Conversation: ${JSON.stringify(history)}. Return ONLY the JSON object. No other text.`;
+    try {
+      const res = await fetch('https://router.huggingface.co/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + apiKey }, body: JSON.stringify({ model: 'dphn/Dolphin-Mistral-24B-Venice-Edition:featherless-ai', messages: [{ role: 'user', content: summaryPrompt }], stream: false }) });
+      const data = await res.json(); const content = data.choices[0].message.content;
+      const jsonMatch = content.match(/```json\n([\s\S]*?)\n```/) || content.match(/({[\s\S]*})/); const jsonStr = jsonMatch ? jsonMatch[1] : content; const summary = JSON.parse(jsonStr);
+      await fetch(`${SERVER}/memory_update`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sessionId, user_update: summary.user_update, diary_entry: summary.diary_entry, convo_summary: summary.convo_summary, new_user_file: summary.new_user_file, full_convo: history, used_joke_ids: usedJokeIds }) });
+      addLine('[ diary written! ]', 'line-dim');
+    } catch (e) { addLine('[ error writing diary: ' + e.message + ' ]', 'line-dim'); }
+  }
+
+  fakeMsg.addEventListener('keydown', async (e) => {
+    if (e.key !== 'Enter' || !e.target.value.trim()) return; const input = e.target.value.trim(); e.target.value = '';
+    if (input === '<next>') { addLine('[ wake forced ]', 'line-dim'); triggerWake(); return; }
+    if (input === '<stop>') { stopStreaming = true; addLine('[ stream stopped ]', 'line-dim'); return; }
+    if (input === '<mood>') { addLine('Mood: ' + currentMoodToken, 'line-dim'); return; }
+    if (input === '<debug>') { console.log({ currentMoodToken, memoryData, historyLength: history.length, usedJokeIds, currentActivity, currentWeather, ignoredWakeCount }); addLine('[ debug printed to console ]', 'line-dim'); return; }
+    if (input === 'niko diary' || input === 'niko, write your diary') { generateSessionSummary(); return; }
+
+    if (inSetup) {
+      try { const res = await fetch(SERVER + '/session/' + input); const data = await res.json(); if (data.error) { addLine('niko> session not found :(', 'line-niko'); return; } sessionId = input; apiKey = data.api_key; username = data.username; history = data.history || []; inSetup = false; clearChat(); prefix.textContent = username + '> '; addLine('[ hey ' + username + ' <3 ]', 'line-dim'); fakeMsg.focus(); updateWeather(); await getCurrentMood(); try { await fetch(`${SERVER}/connected/${sessionId}`, { method: 'POST' }); } catch(e) {} resetIdleTimer(); } catch (e) { addLine('niko> error: ' + e.message, 'line-niko'); }
+      return;
+    }
+
+    lastInteractionTime = Date.now(); ignoredWakeCount = 0; isLoading = true;
+    addLine(username + '> ' + input, 'line-user'); dimOldLines(); history.push({ role: 'user', content: input });
+    messageCountSinceMoodUpdate++; if (messageCountSinceMoodUpdate >= 9) { await updateMood(); messageCountSinceMoodUpdate = 0; }
+    const mood = await getCurrentMood(); const systemPrompt = buildFullPrompt(mood, mood.wake);
+    const messages = [{ role: 'system', content: systemPrompt }, ...history]; const div = addLine('niko> ', 'line-niko');
+    const fullReply = await streamReply(messages, div); trackJokes(fullReply);
+    history.push({ role: 'assistant', content: fullReply });
+    fetch(SERVER + '/session/' + sessionId + '/history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ history }) });
+    resetIdleTimer(); dimOldLines(); isLoading = false;
+  });
+
+  document.addEventListener('keydown', (e) => { if ((e.ctrlKey && e.key === 'c') || e.key === 'Escape') { stopStreaming = true; addLine('[ interrupted ]', 'line-dim'); } });
+  console.log('niko ready | <next> = wake | <mood> = mood | <stop>/Ctrl+C = stop | <debug> = state | "niko diary" = save');
+  fakeMsg.focus();
+})();
